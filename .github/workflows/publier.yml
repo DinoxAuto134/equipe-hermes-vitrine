@@ -1,0 +1,88 @@
+name: Contrôler et publier la vitrine
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "*/10 * * * *"   # met à jour l'état du service toutes les 10 min
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  controler:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Préparer le site
+        run: |
+          mkdir _site
+          cp -r index.html manifest.webmanifest sw.js favicon.ico icons media _site/
+
+      - name: Récupérer l'état du service (adresse gardée en secret)
+        env:
+          BADGE_URL: ${{ secrets.STATUS_BADGE_URL }}
+        run: |
+          now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          if [ -n "$BADGE_URL" ] && curl -fsS --max-time 20 "$BADGE_URL" -o badge.svg && grep -q "<svg" badge.svg; then
+            cp badge.svg _site/status.svg
+            if grep -q "En ligne" badge.svg; then up=true; else up=false; fi
+          else
+            cp status.svg _site/status.svg
+            up=null
+          fi
+          printf '{"up":%s,"checked":"%s"}\n' "$up" "$now" > _site/status.json
+          cat _site/status.json
+
+      - name: Contrôler liens, images, manifeste et vie privée
+        run: python3 scripts/verifier.py _site
+
+      - name: Lighthouse mobile (bloque si score trop bas)
+        if: github.event_name != 'schedule'
+        run: |
+          python3 -m http.server 8080 --directory _site >/dev/null 2>&1 &
+          sleep 2
+          npx --yes lighthouse@12 http://localhost:8080/ --quiet --output=json --output-path=lh.json \
+            --form-factor=mobile --screenEmulation.mobile --throttling-method=simulate \
+            --chrome-flags="--headless=new --no-sandbox"
+          python3 - <<'EOF'
+          import json, sys
+          r = json.load(open("lh.json"))
+          mins = {"performance": 0.80, "accessibility": 0.95, "best-practices": 0.90, "seo": 0.90}
+          ko = False
+          for k, m in mins.items():
+              s = r["categories"][k]["score"]
+              print(f"{k}: {round(s*100)} (minimum {round(m*100)})")
+              ko |= s < m
+          sys.exit(1 if ko else 0)
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name != 'schedule'
+        with:
+          name: lighthouse
+          path: lh.json
+          if-no-files-found: ignore
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  publier:
+    needs: controler
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
