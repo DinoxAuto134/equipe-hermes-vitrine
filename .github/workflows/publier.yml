@@ -45,21 +45,27 @@ jobs:
       - name: Contrôler liens, images, manifeste et vie privée
         run: python3 scripts/verifier.py _site
 
-      - name: Lighthouse mobile (bloque si score trop bas)
+      - name: Lighthouse mobile (médiane de 3 passages, bloque si score trop bas)
         if: github.event_name != 'schedule'
         run: |
           python3 -m http.server 8080 --directory _site >/dev/null 2>&1 &
           sleep 2
-          npx --yes lighthouse@12 http://localhost:8080/ --quiet --output=json --output-path=lh.json \
-            --form-factor=mobile --screenEmulation.mobile --throttling-method=simulate \
-            --chrome-flags="--headless=new --no-sandbox"
+          LH="npx --yes lighthouse@12 http://localhost:8080/ --quiet --output=json --form-factor=mobile --screenEmulation.mobile --throttling-method=simulate --chrome-flags=--headless=new --chrome-flags=--no-sandbox"
+          # 1er passage : mesure la puissance du runner (benchmarkIndex) pour calibrer le ralentissement CPU
+          $LH --output-path=calib.json
+          MULT=$(python3 -c "import json;b=json.load(open('calib.json'))['environment']['benchmarkIndex'];print(max(1.0,min(4.0,round(4*b/1500,1))))")
+          echo "Ralentissement CPU calibré : x$MULT"
+          for i in 1 2 3; do $LH --throttling.cpuSlowdownMultiplier=$MULT --output-path=lh$i.json; done
           python3 - <<'EOF'
-          import json, sys
-          r = json.load(open("lh.json"))
-          mins = {"performance": 0.80, "accessibility": 0.95, "best-practices": 0.90, "seo": 0.90}
+          import json, statistics, sys, shutil
+          runs = [json.load(open(f"lh{i}.json")) for i in (1, 2, 3)]
+          mins = {"performance": 0.85, "accessibility": 0.95, "best-practices": 0.90, "seo": 0.90}
           ko = False
+          perf = [r["categories"]["performance"]["score"] for r in runs]
+          shutil.copy(f"lh{perf.index(statistics.median(perf))+1}.json", "lh.json")
+          print("benchmarkIndex :", runs[0]["environment"]["benchmarkIndex"])
           for k, m in mins.items():
-              s = r["categories"][k]["score"]
+              s = statistics.median(r["categories"][k]["score"] for r in runs)
               print(f"{k}: {round(s*100)} (minimum {round(m*100)})")
               ko |= s < m
           sys.exit(1 if ko else 0)
