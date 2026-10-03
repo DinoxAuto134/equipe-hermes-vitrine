@@ -27,7 +27,7 @@ jobs:
       - name: Préparer le site
         run: |
           mkdir _site
-          cp -r index.html terms.html privacy.html manifest.webmanifest sw.js favicon.ico icons media fonts _site/
+          cp -r CNAME robots.txt sitemap.xml index.html terms.html privacy.html manifest.webmanifest sw.js favicon.ico icons media fonts _site/
 
       - name: Récupérer l'état du service (adresse gardée en secret)
         env:
