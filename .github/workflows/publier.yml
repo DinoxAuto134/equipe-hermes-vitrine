@@ -3,6 +3,8 @@ name: Contrôler et publier la vitrine
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   schedule:
     - cron: "*/10 * * * *"   # met à jour l'état du service toutes les 10 min
   workflow_dispatch:
@@ -13,7 +15,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: pages-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
   cancel-in-progress: false
 
 jobs:
@@ -25,22 +27,30 @@ jobs:
       - name: Préparer le site
         run: |
           mkdir _site
-          cp -r index.html terms.html privacy.html manifest.webmanifest sw.js favicon.ico icons media _site/
+          cp -r index.html terms.html privacy.html manifest.webmanifest sw.js favicon.ico icons media fonts _site/
 
       - name: Récupérer l'état du service (adresse gardée en secret)
         env:
           BADGE_URL: ${{ secrets.STATUS_BADGE_URL }}
         run: |
           now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          up=null; uptime30=null
           if [ -n "$BADGE_URL" ] && curl -fsS --max-time 20 "$BADGE_URL" -o badge.svg && grep -q "<svg" badge.svg; then
             cp badge.svg _site/status.svg
             if grep -q "En ligne" badge.svg; then up=true; else up=false; fi
+            # même moniteur, badge « uptime 720 h » : .../api/badge/<id>/status?... -> .../api/badge/<id>/uptime/720
+            UPT_URL="${BADGE_URL%%/status*}/uptime/720"
+            if curl -fsS --max-time 20 "$UPT_URL" -o upt.svg; then
+              v=$(grep -oE '[0-9]+(\.[0-9]+)?%' upt.svg | head -1 | tr -d '%')
+              [ -n "$v" ] && uptime30=$v
+            fi
           else
             cp status.svg _site/status.svg
-            up=null
           fi
-          printf '{"up":%s,"checked":"%s"}\n' "$up" "$now" > _site/status.json
+          printf '{"up":%s,"uptime30":%s,"checked":"%s"}\n' "$up" "$uptime30" "$now" > _site/status.json
           cat _site/status.json
+          # sécurité : aucune adresse du serveur ne doit finir dans le site
+          ! grep -qiE 'https?://|[0-9]+-[0-9]+-[0-9]+-[0-9]+' _site/status.json
 
       - name: Contrôler liens, images, manifeste et vie privée
         run: python3 scripts/verifier.py _site
@@ -79,12 +89,15 @@ jobs:
           if-no-files-found: ignore
 
       - uses: actions/configure-pages@v5
+        if: github.event_name != 'pull_request'
       - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
         with:
           path: _site
 
   publier:
     needs: controler
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
